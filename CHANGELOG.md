@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2.0.1] - 2025-01-28
+
+### Removed
+- **Mobile Dashboard**: Temporarily removed PWA dashboard implementation for later development
+- **API Components**: Removed Google Apps Script Web App API and related files
+- **PWA Files**: Removed manifest.json, service worker, and mobile interface
+
 ## [v2.0.0] - 2025-01-28
 
 ### Major Refactoring & Performance Optimization
