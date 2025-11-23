@@ -175,6 +175,185 @@ function isValidTransactionRow(row) {
 }
 
 // ============================================================================
+// SMART GOAL TRACKING & ALERT SYSTEM
+// ============================================================================
+
+/**
+ * Calculate 6-month average and set progressive reduction goals
+ */
+function calculateGoalTargets(masterSheet) {
+  var sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  
+  var data = masterSheet.getDataRange().getValues();
+  var categoryTotals = {};
+  var monthCount = {};
+  
+  // Calculate 6-month averages by category
+  data.slice(1).forEach(function(row) {
+    var date = new Date(row[1]);
+    var amount = parseFloat(row[2]);
+    var category = row[5];
+    var type = row[4];
+    
+    if (date >= sixMonthsAgo && type === "Debit" && !isNaN(amount)) {
+      var monthKey = date.getFullYear() + "-" + date.getMonth();
+      
+      if (!categoryTotals[category]) categoryTotals[category] = {};
+      if (!categoryTotals[category][monthKey]) categoryTotals[category][monthKey] = 0;
+      categoryTotals[category][monthKey] += amount;
+      
+      if (!monthCount[monthKey]) monthCount[monthKey] = true;
+    }
+  });
+  
+  var totalMonths = Object.keys(monthCount).length || 6;
+  var goals = {};
+  
+  // Calculate progressive reduction goals
+  for (var category in categoryTotals) {
+    var monthlyTotals = Object.values(categoryTotals[category]);
+    var average = monthlyTotals.reduce((sum, val) => sum + val, 0) / totalMonths;
+    
+    var currentMonth = getCurrentGoalPhase();
+    var reductionRate = currentMonth <= 3 ? 0.10 : currentMonth <= 6 ? 0.20 : 0.30;
+    
+    goals[category] = {
+      baseline: average,
+      target: average * (1 - reductionRate),
+      reductionRate: reductionRate * 100,
+      phase: currentMonth <= 3 ? "Phase 1" : currentMonth <= 6 ? "Phase 2" : "Phase 3"
+    };
+  }
+  
+  return goals;
+}
+
+/**
+ * Get current goal phase (1-9 months from start)
+ */
+function getCurrentGoalPhase() {
+  var startDate = new Date("2025-01-01"); // Goal start date
+  var currentDate = new Date();
+  var monthsDiff = (currentDate.getFullYear() - startDate.getFullYear()) * 12 + 
+                   (currentDate.getMonth() - startDate.getMonth()) + 1;
+  return Math.min(monthsDiff, 9);
+}
+
+/**
+ * Calculate current month spending by category
+ */
+function getCurrentMonthSpending(masterSheet) {
+  var currentMonth = new Date().getMonth();
+  var currentYear = new Date().getFullYear();
+  var data = masterSheet.getDataRange().getValues();
+  var spending = {};
+  
+  data.slice(1).forEach(function(row) {
+    var date = new Date(row[1]);
+    var amount = parseFloat(row[2]);
+    var category = row[5];
+    var type = row[4];
+    
+    if (date.getMonth() === currentMonth && date.getFullYear() === currentYear && 
+        type === "Debit" && !isNaN(amount)) {
+      spending[category] = (spending[category] || 0) + amount;
+    }
+  });
+  
+  return spending;
+}
+
+/**
+ * Generate smart alerts and contextual messages
+ */
+function generateSmartAlerts(goals, currentSpending) {
+  var alerts = [];
+  var today = new Date();
+  var daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  var daysPassed = today.getDate();
+  var monthProgress = daysPassed / daysInMonth;
+  
+  for (var category in goals) {
+    var goal = goals[category];
+    var spent = currentSpending[category] || 0;
+    var targetSpent = goal.target * monthProgress;
+    var budgetUsed = spent / goal.target;
+    
+    // Budget warning alerts (75% threshold)
+    if (budgetUsed >= 0.75 && budgetUsed < 1.0) {
+      var remaining = goal.target - spent;
+      alerts.push({
+        type: "warning",
+        category: category,
+        message: "⚠️ *" + category + "*: You're ₹" + remaining.toFixed(0) + " away from your goal! (" + (budgetUsed * 100).toFixed(0) + "% used)"
+      });
+    }
+    
+    // Budget exceeded alerts
+    else if (budgetUsed >= 1.0) {
+      var excess = spent - goal.target;
+      alerts.push({
+        type: "critical",
+        category: category,
+        message: "🚨 *" + category + "*: Budget exceeded by ₹" + excess.toFixed(0) + "! Consider reducing spending."
+      });
+    }
+    
+    // Unusual spending detection (spending too fast)
+    else if (spent > targetSpent * 1.5 && daysPassed < 15) {
+      alerts.push({
+        type: "anomaly",
+        category: category,
+        message: "📊 *" + category + "*: Spending faster than usual. Current: ₹" + spent.toFixed(0) + ", Expected: ₹" + targetSpent.toFixed(0)
+      });
+    }
+    
+    // Positive progress alerts
+    else if (budgetUsed < 0.5 && monthProgress > 0.5) {
+      var saved = (goal.baseline - spent);
+      if (saved > 0) {
+        alerts.push({
+          type: "positive",
+          category: category,
+          message: "🎉 *" + category + "*: Great progress! You've saved ₹" + saved.toFixed(0) + " compared to your baseline."
+        });
+      }
+    }
+  }
+  
+  return alerts;
+}
+
+/**
+ * Generate contextual motivational messages
+ */
+function getContextualMessage(alerts, totalSavings) {
+  var messages = [];
+  
+  if (totalSavings > 1000) {
+    messages.push("💪 *Motivational*: Excellent! You've saved ₹" + totalSavings.toFixed(0) + " this month!");
+  }
+  
+  var criticalAlerts = alerts.filter(a => a.type === "critical").length;
+  var warningAlerts = alerts.filter(a => a.type === "warning").length;
+  
+  if (criticalAlerts === 0 && warningAlerts === 0) {
+    messages.push("✅ *Educational*: All categories are on track! Keep up the great work!");
+  } else if (criticalAlerts > 0) {
+    messages.push("🎯 *Actionable*: Focus on reducing spending in " + criticalAlerts + " category(ies) to get back on track.");
+  }
+  
+  // Add seasonal/contextual advice
+  var month = new Date().getMonth();
+  if (month === 10 || month === 11) { // Nov-Dec (Festival season)
+    messages.push("🪔 *Seasonal*: Festival season - plan your spending to stay within goals!");
+  }
+  
+  return messages;
+}
+
+// ============================================================================
 // TELEGRAM NOTIFICATION SYSTEM - REFACTORED
 // ============================================================================
 
@@ -270,37 +449,239 @@ function calculateDailySummary(masterSheet) {
 }
 
 /**
- * Build formatted Telegram message
+ * Build formatted Telegram message with goal tracking
  */
-function buildTelegramMessage(summaryData) {
-  var message = "📅 *Daily Spend Summary* - " + summaryData.todayStr + "\\n\\n";
+function buildTelegramMessage(summaryData, goals, currentSpending, alerts) {
+  var message = "📅 *Daily Spend Summary* - " + summaryData.todayStr + "\n\n";
   
   // Today's spending
   if (summaryData.totalToday > 0) {
     for (var person in summaryData.todayBreakdown) {
-      message += "👤 *" + person + "*\\n";
+      message += "👤 *" + person + "*\n";
       for (var bank in summaryData.todayBreakdown[person]) {
-        message += "💳 " + bank + ": Rs. " + summaryData.todayBreakdown[person][bank].toFixed(2) + "\\n";
+        message += "💳 " + bank + ": Rs. " + summaryData.todayBreakdown[person][bank].toFixed(2) + "\n";
       }
-      message += "\\n";
+      message += "\n";
     }
-    message += "📊 *Total Spent Today*: Rs. " + summaryData.totalToday.toFixed(2) + "\\n\\n";
+    message += "📊 *Total Spent Today*: Rs. " + summaryData.totalToday.toFixed(2) + "\n\n";
   } else {
-    message += "No spends today ✅\\n\\n";
+    message += "No spends today ✅\n\n";
   }
   
   // Month-to-date spending
-  message += "📆 *Month-to-Date (" + summaryData.monthStr + ")*\\n\\n";
+  message += "📆 *Month-to-Date (" + summaryData.monthStr + ")*\n\n";
   for (var person in summaryData.mtdBreakdown) {
-    message += "👤 *" + person + "*\\n";
+    message += "👤 *" + person + "*\n";
     for (var bank in summaryData.mtdBreakdown[person]) {
-      message += "💳 " + bank + ": Rs. " + summaryData.mtdBreakdown[person][bank].toFixed(2) + "\\n";
+      message += "💳 " + bank + ": Rs. " + summaryData.mtdBreakdown[person][bank].toFixed(2) + "\n";
     }
-    message += "\\n";
+    message += "\n";
   }
-  message += "📊 *Total MTD*: Rs. " + summaryData.totalMTD.toFixed(2);
+  message += "📊 *Total MTD*: Rs. " + summaryData.totalMTD.toFixed(2) + "\n\n";
+  
+  // Goal Progress Section
+  if (goals && Object.keys(goals).length > 0) {
+    message += "🎯 *Goal Progress*\n\n";
+    var totalSavings = 0;
+    
+    for (var category in goals) {
+      var goal = goals[category];
+      var spent = currentSpending[category] || 0;
+      var progress = Math.min((spent / goal.target) * 100, 100);
+      var savings = goal.baseline - spent;
+      
+      if (savings > 0) totalSavings += savings;
+      
+      var emoji = progress < 75 ? "🟢" : progress < 100 ? "🟡" : "🔴";
+      message += emoji + " *" + category + "*: " + progress.toFixed(0) + "% (₹" + spent.toFixed(0) + "/₹" + goal.target.toFixed(0) + ")\n";
+    }
+    
+    if (totalSavings > 0) {
+      message += "\n💰 *Total Savings*: ₹" + totalSavings.toFixed(0) + "\n";
+    }
+    message += "\n";
+  }
+  
+  // Smart Alerts Section
+  if (alerts && alerts.length > 0) {
+    message += "🚨 *Smart Alerts*\n\n";
+    alerts.slice(0, 3).forEach(function(alert) {
+      message += alert.message + "\n\n";
+    });
+  }
+  
+  // Contextual Messages
+  var contextualMessages = getContextualMessage(alerts || [], totalSavings || 0);
+  if (contextualMessages.length > 0) {
+    contextualMessages.forEach(function(msg) {
+      message += msg + "\n\n";
+    });
+  }
   
   return message;
+}
+
+/**
+ * Send weekly summary via Telegram with goal tracking
+ */
+function sendWeeklySummaryTelegram() {
+  try {
+    Logger.log("📱 Preparing Telegram weekly summary with goal tracking");
+    
+    var masterSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(MERGER_CONFIG.MASTER_SHEET_NAME);
+    if (!masterSheet) {
+      Logger.log("❌ Master sheet not found. Run mergeTransactionSheets() first.");
+      return;
+    }
+    
+    var weeklyData = calculateWeeklySummary(masterSheet);
+    var goals = calculateGoalTargets(masterSheet);
+    var currentSpending = getCurrentMonthSpending(masterSheet);
+    var alerts = generateSmartAlerts(goals, currentSpending);
+    
+    var message = buildWeeklyTelegramMessage(weeklyData, goals, currentSpending, alerts);
+    sendTelegramMessage(message);
+    
+  } catch (error) {
+    Logger.log("❌ Error sending weekly Telegram summary: " + error.toString());
+  }
+}
+
+/**
+ * Calculate weekly summary data
+ */
+function calculateWeeklySummary(masterSheet) {
+  var today = new Date();
+  var weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+  
+  var data = masterSheet.getDataRange().getValues();
+  var weeklySpending = {};
+  var categorySpending = {};
+  var totalWeekly = 0;
+  
+  data.slice(1).forEach(function(row) {
+    var date = new Date(row[1]);
+    var amount = parseFloat(row[2]);
+    var category = row[5];
+    var person = row[9];
+    var type = row[4];
+    
+    if (date >= weekAgo && date <= today && type === "Debit" && !isNaN(amount)) {
+      if (!weeklySpending[person]) weeklySpending[person] = 0;
+      weeklySpending[person] += amount;
+      
+      if (!categorySpending[category]) categorySpending[category] = 0;
+      categorySpending[category] += amount;
+      
+      totalWeekly += amount;
+    }
+  });
+  
+  return {
+    weeklySpending: weeklySpending,
+    categorySpending: categorySpending,
+    totalWeekly: totalWeekly,
+    weekStart: Utilities.formatDate(weekAgo, Session.getScriptTimeZone(), "MMM dd"),
+    weekEnd: Utilities.formatDate(today, Session.getScriptTimeZone(), "MMM dd")
+  };
+}
+
+/**
+ * Build weekly Telegram message
+ */
+function buildWeeklyTelegramMessage(weeklyData, goals, currentSpending, alerts) {
+  var message = "📅 *Weekly Summary* (" + weeklyData.weekStart + " - " + weeklyData.weekEnd + ")\n\n";
+  
+  // Weekly spending by person
+  message += "👥 *Weekly Spending*\n";
+  for (var person in weeklyData.weeklySpending) {
+    message += "👤 " + person + ": ₹" + weeklyData.weeklySpending[person].toFixed(2) + "\n";
+  }
+  message += "\n📊 *Total Weekly*: ₹" + weeklyData.totalWeekly.toFixed(2) + "\n\n";
+  
+  // Top spending categories
+  message += "📊 *Top Categories This Week*\n";
+  var sortedCategories = Object.entries(weeklyData.categorySpending)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 5);
+  
+  sortedCategories.forEach(function([category, amount]) {
+    message += "💳 " + category + ": ₹" + amount.toFixed(2) + "\n";
+  });
+  message += "\n";
+  
+  // Monthly goal progress
+  if (goals && Object.keys(goals).length > 0) {
+    message += "🎯 *Monthly Goal Progress*\n\n";
+    var onTrackCount = 0;
+    var totalGoals = 0;
+    
+    for (var category in goals) {
+      var goal = goals[category];
+      var spent = currentSpending[category] || 0;
+      var progress = (spent / goal.target) * 100;
+      
+      if (progress <= 100) onTrackCount++;
+      totalGoals++;
+      
+      var status = progress < 75 ? "🟢 On Track" : progress < 100 ? "🟡 Warning" : "🔴 Over Budget";
+      message += "• " + category + ": " + status + " (" + progress.toFixed(0) + "%)\n";
+    }
+    
+    var overallScore = (onTrackCount / totalGoals) * 100;
+    message += "\n🎆 *Overall Score*: " + overallScore.toFixed(0) + "% goals on track\n\n";
+  }
+  
+  // Weekly insights and recommendations
+  var weeklyInsights = generateWeeklyInsights(weeklyData, goals, currentSpending);
+  if (weeklyInsights.length > 0) {
+    message += "💡 *Weekly Insights*\n\n";
+    weeklyInsights.forEach(function(insight) {
+      message += insight + "\n\n";
+    });
+  }
+  
+  return message;
+}
+
+/**
+ * Generate weekly insights and recommendations
+ */
+function generateWeeklyInsights(weeklyData, goals, currentSpending) {
+  var insights = [];
+  var today = new Date();
+  var dayOfMonth = today.getDate();
+  var daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  var monthProgress = dayOfMonth / daysInMonth;
+  
+  // Check if spending is on track for the month
+  var totalMonthlyTarget = Object.values(goals || {}).reduce((sum, goal) => sum + goal.target, 0);
+  var totalCurrentSpending = Object.values(currentSpending || {}).reduce((sum, spent) => sum + spent, 0);
+  var expectedSpending = totalMonthlyTarget * monthProgress;
+  
+  if (totalCurrentSpending < expectedSpending * 0.8) {
+    insights.push("🎉 *Excellent*: You're spending 20% less than expected this month!");
+  } else if (totalCurrentSpending > expectedSpending * 1.2) {
+    insights.push("⚠️ *Alert*: Spending is 20% higher than expected. Consider reducing expenses.");
+  }
+  
+  // Weekly vs daily average insight
+  var dailyAverage = weeklyData.totalWeekly / 7;
+  if (dailyAverage > 1000) {
+    insights.push("📊 *Insight*: Daily average this week: ₹" + dailyAverage.toFixed(0) + ". Consider meal planning to reduce food costs.");
+  }
+  
+  // Category-specific insights
+  var topCategory = Object.entries(weeklyData.categorySpending)
+    .sort(([,a], [,b]) => b - a)[0];
+  
+  if (topCategory && topCategory[1] > weeklyData.totalWeekly * 0.4) {
+    insights.push("🎯 *Focus Area*: " + topCategory[0] + " accounts for " + 
+                 ((topCategory[1] / weeklyData.totalWeekly) * 100).toFixed(0) + 
+                 "% of weekly spending. Look for optimization opportunities.");
+  }
+  
+  return insights;
 }
 
 /**
