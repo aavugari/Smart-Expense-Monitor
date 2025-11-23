@@ -179,6 +179,30 @@ function isValidTransactionRow(row) {
 // ============================================================================
 
 /**
+ * Categories to exclude from goal tracking (subscriptions and others)
+ */
+function getExcludedCategories() {
+  return [
+    "Others",
+    "Google Subscription", 
+    "Youtube Subscription",
+    "Netflix",
+    "Subscription",
+    "Apple"
+  ];
+}
+
+/**
+ * Check if category should be excluded from goal tracking
+ */
+function isSubscriptionCategory(category) {
+  var excludedCategories = getExcludedCategories();
+  return excludedCategories.some(function(excluded) {
+    return category && category.toLowerCase().includes(excluded.toLowerCase());
+  });
+}
+
+/**
  * Calculate 6-month average and set progressive reduction goals
  */
 function calculateGoalTargets(masterSheet) {
@@ -189,14 +213,14 @@ function calculateGoalTargets(masterSheet) {
   var categoryTotals = {};
   var monthCount = {};
   
-  // Calculate 6-month averages by category
+  // Calculate 6-month averages by category (excluding subscriptions)
   data.slice(1).forEach(function(row) {
     var date = new Date(row[1]);
     var amount = parseFloat(row[2]);
     var category = row[5];
     var type = row[4];
     
-    if (date >= sixMonthsAgo && type === "Debit" && !isNaN(amount)) {
+    if (date >= sixMonthsAgo && type === "Debit" && !isNaN(amount) && !isSubscriptionCategory(category)) {
       var monthKey = date.getFullYear() + "-" + date.getMonth();
       
       if (!categoryTotals[category]) categoryTotals[category] = {};
@@ -241,7 +265,7 @@ function getCurrentGoalPhase() {
 }
 
 /**
- * Calculate current month spending by category
+ * Calculate current month spending by category (excluding subscriptions)
  */
 function getCurrentMonthSpending(masterSheet) {
   var currentMonth = new Date().getMonth();
@@ -256,12 +280,52 @@ function getCurrentMonthSpending(masterSheet) {
     var type = row[4];
     
     if (date.getMonth() === currentMonth && date.getFullYear() === currentYear && 
-        type === "Debit" && !isNaN(amount)) {
+        type === "Debit" && !isNaN(amount) && !isSubscriptionCategory(category)) {
       spending[category] = (spending[category] || 0) + amount;
     }
   });
   
   return spending;
+}
+
+/**
+ * Calculate current month subscription spending
+ */
+function getCurrentMonthSubscriptions(masterSheet) {
+  var currentMonth = new Date().getMonth();
+  var currentYear = new Date().getFullYear();
+  var data = masterSheet.getDataRange().getValues();
+  var subscriptions = {};
+  
+  data.slice(1).forEach(function(row) {
+    var date = new Date(row[1]);
+    var amount = parseFloat(row[2]);
+    var category = row[5];
+    var info = row[3];
+    var type = row[4];
+    
+    if (date.getMonth() === currentMonth && date.getFullYear() === currentYear && 
+        type === "Debit" && !isNaN(amount) && isSubscriptionCategory(category)) {
+      
+      var serviceName = getServiceName(info, category);
+      subscriptions[serviceName] = (subscriptions[serviceName] || 0) + amount;
+    }
+  });
+  
+  return subscriptions;
+}
+
+/**
+ * Extract service name from transaction info
+ */
+function getServiceName(info, category) {
+  if (info.toLowerCase().includes('netflix')) return 'Netflix';
+  if (info.toLowerCase().includes('youtube') || info.toLowerCase().includes('google')) return 'YouTube Premium';
+  if (info.toLowerCase().includes('apple')) return 'Apple Services';
+  if (info.toLowerCase().includes('amazon')) return 'Amazon Prime';
+  if (info.toLowerCase().includes('spotify')) return 'Spotify';
+  
+  return category || 'Other Subscription';
 }
 
 /**
@@ -358,11 +422,11 @@ function getContextualMessage(alerts, totalSavings) {
 // ============================================================================
 
 /**
- * Send daily summary via Telegram with improved error handling
+ * Send daily summary via Telegram with goal tracking and subscription tracking
  */
 function sendDailySummaryTelegram() {
   try {
-    Logger.log("📱 Preparing Telegram daily summary");
+    Logger.log("📱 Preparing Telegram daily summary with goal tracking");
     
     var masterSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(MERGER_CONFIG.MASTER_SHEET_NAME);
     if (!masterSheet) {
@@ -371,13 +435,12 @@ function sendDailySummaryTelegram() {
     }
     
     var summaryData = calculateDailySummary(masterSheet);
+    var goals = calculateGoalTargets(masterSheet);
+    var currentSpending = getCurrentMonthSpending(masterSheet);
+    var subscriptions = getCurrentMonthSubscriptions(masterSheet);
+    var alerts = generateSmartAlerts(goals, currentSpending);
     
-    if (summaryData.totalToday === 0 && summaryData.totalMTD === 0) {
-      Logger.log("ℹ️ No transactions to report");
-      return;
-    }
-    
-    var message = buildTelegramMessage(summaryData);
+    var message = buildTelegramMessage(summaryData, goals, currentSpending, alerts, subscriptions);
     sendTelegramMessage(message);
     
   } catch (error) {
@@ -449,9 +512,9 @@ function calculateDailySummary(masterSheet) {
 }
 
 /**
- * Build formatted Telegram message with goal tracking
+ * Build formatted Telegram message with goal tracking and subscription tracking
  */
-function buildTelegramMessage(summaryData, goals, currentSpending, alerts) {
+function buildTelegramMessage(summaryData, goals, currentSpending, alerts, subscriptions) {
   var message = "📅 *Daily Spend Summary* - " + summaryData.todayStr + "\n\n";
   
   // Today's spending
@@ -502,6 +565,20 @@ function buildTelegramMessage(summaryData, goals, currentSpending, alerts) {
     message += "\n";
   }
   
+  // Active Subscriptions Section
+  if (subscriptions && Object.keys(subscriptions).length > 0) {
+    message += "📱 *Active Subscriptions*\n";
+    var totalSubscriptions = 0;
+    
+    for (var service in subscriptions) {
+      var amount = subscriptions[service];
+      totalSubscriptions += amount;
+      message += "🔔 " + service + ": ₹" + amount.toFixed(2) + "\n";
+    }
+    
+    message += "💳 *Total Subscriptions*: ₹" + totalSubscriptions.toFixed(2) + "\n\n";
+  }
+  
   // Smart Alerts Section
   if (alerts && alerts.length > 0) {
     message += "🚨 *Smart Alerts*\n\n";
@@ -537,9 +614,10 @@ function sendWeeklySummaryTelegram() {
     var weeklyData = calculateWeeklySummary(masterSheet);
     var goals = calculateGoalTargets(masterSheet);
     var currentSpending = getCurrentMonthSpending(masterSheet);
+    var subscriptions = getCurrentMonthSubscriptions(masterSheet);
     var alerts = generateSmartAlerts(goals, currentSpending);
     
-    var message = buildWeeklyTelegramMessage(weeklyData, goals, currentSpending, alerts);
+    var message = buildWeeklyTelegramMessage(weeklyData, goals, currentSpending, alerts, subscriptions);
     sendTelegramMessage(message);
     
   } catch (error) {
@@ -587,9 +665,9 @@ function calculateWeeklySummary(masterSheet) {
 }
 
 /**
- * Build weekly Telegram message
+ * Build weekly Telegram message with subscription tracking
  */
-function buildWeeklyTelegramMessage(weeklyData, goals, currentSpending, alerts) {
+function buildWeeklyTelegramMessage(weeklyData, goals, currentSpending, alerts, subscriptions) {
   var message = "📅 *Weekly Summary* (" + weeklyData.weekStart + " - " + weeklyData.weekEnd + ")\n\n";
   
   // Weekly spending by person
@@ -625,11 +703,25 @@ function buildWeeklyTelegramMessage(weeklyData, goals, currentSpending, alerts) 
       totalGoals++;
       
       var status = progress < 75 ? "🟢 On Track" : progress < 100 ? "🟡 Warning" : "🔴 Over Budget";
-      message += "• " + category + ": " + status + " (" + progress.toFixed(0) + "%)\n";
+      message += "• " + category + ": " + status + " (₹" + spent.toFixed(0) + "/₹" + goal.target.toFixed(0) + " - " + progress.toFixed(0) + "%)\n";
     }
     
     var overallScore = (onTrackCount / totalGoals) * 100;
     message += "\n🎆 *Overall Score*: " + overallScore.toFixed(0) + "% goals on track\n\n";
+  }
+  
+  // Active Subscriptions Section
+  if (subscriptions && Object.keys(subscriptions).length > 0) {
+    message += "📱 *Monthly Subscriptions*\n";
+    var totalSubscriptions = 0;
+    
+    for (var service in subscriptions) {
+      var amount = subscriptions[service];
+      totalSubscriptions += amount;
+      message += "🔔 " + service + ": ₹" + amount.toFixed(2) + "\n";
+    }
+    
+    message += "💳 *Total Subscriptions*: ₹" + totalSubscriptions.toFixed(2) + "\n\n";
   }
   
   // Weekly insights and recommendations
